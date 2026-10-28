@@ -1,0 +1,17 @@
+# restic hariç tutma desenleri (her satır bir desen). Yollar konteyner içindeki /source altına göredir.
+
+# Bu yedekleme sisteminin kendi geri yükleme klasörü ve önbelleği
+**/casaos-backup/restore
+**/casaos-backup/cache
+
+# Geçici / yeniden üretilebilir dosyalar
+*.tmp
+*.swp
+**/.Trash-*
+**/lost+found
+
+# Medya sunucularının yeniden oluşturulabilen önbellekleri (isterseniz kaldırın)
+**/jellyfin/cache
+**/jellyfin/transcodes
+**/plex/Library/Application Support/Plex Media Server/Cache
+**/plex/Library/Application Support/Plex Media Server/Codecs

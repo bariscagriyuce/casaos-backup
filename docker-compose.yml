@@ -1,0 +1,38 @@
+name: casaos-backup
+
+services:
+  casaos-backup:
+    build: .
+    image: casaos-backup:local
+    container_name: casaos-backup
+    hostname: casaos
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      RESTIC_CACHE_DIR: /cache
+      # Prune ile silinen parçalar Drive çöp kutusunda kotayı doldurmasın
+      RCLONE_DRIVE_USE_TRASH: "false"
+    labels:
+      casaos-backup.self: "true"
+    volumes:
+      # Yedek sırasında konteynerleri durdurup başlatmak için
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/config
+      - ./cache:/cache
+      - ./restore:/restore
+
+      # ---- Yedeklenecek yollar: hepsi /source altına, salt okunur ----
+      # Uygulama verileri (CasaOS uygulamalarının ayarları/veritabanları)
+      - /DATA/AppData:/source/DATA/AppData:ro
+      # CasaOS uygulama tanımları (docker-compose dosyaları) ve veritabanı
+      - /var/lib/casaos:/source/var/lib/casaos:ro
+      # CasaOS sistem yapılandırması
+      - /etc/casaos:/source/etc/casaos:ro
+
+      # İsteğe bağlı: kişisel klasörler (büyük olabilir, Drive kotanıza dikkat)
+      # - /DATA/Documents:/source/DATA/Documents:ro
+      # - /DATA/Gallery:/source/DATA/Gallery:ro
+      # İsteğe bağlı: isimli Docker volume'ları
+      # - /var/lib/docker/volumes:/source/var/lib/docker/volumes:ro
