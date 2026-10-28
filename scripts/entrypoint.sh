@@ -23,10 +23,16 @@ until [ -s "$RCLONE_CONFIG" ]; do
   sleep 60
 done
 
-if ! restic cat config >/dev/null 2>&1; then
+# Depoya ulaşılamazsa (ör. eksik/süresi dolmuş token) çıkıp crash-loop'a girmek yerine bekleyip tekrar dene;
+# böylece konteyner ayakta kalır ve rclone ayarı düzeltilebilir.
+until restic cat config >/dev/null 2>&1; do
   log "Restic deposu bulunamadı, oluşturuluyor: $RESTIC_REPOSITORY"
-  restic init
-fi
+  if restic init; then
+    break
+  fi
+  log "HATA: depoya ulaşılamadı. rclone ayarını kontrol edin: docker exec casaos-backup rclone lsd gdrive:  (5 dk sonra tekrar denenecek)"
+  sleep 300
+done
 
 cat > /etc/crontabs/root <<EOF
 $BACKUP_CRON /usr/local/bin/backup > /proc/1/fd/1 2>&1

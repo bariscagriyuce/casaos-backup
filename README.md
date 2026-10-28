@@ -75,6 +75,32 @@ In the wizard:
 
 Within a minute the container detects the config and creates the `casaos-backup` folder and the restic repository on Drive.
 
+**Alternative (recommended if your terminal disconnects, e.g. the CasaOS web terminal):** create the config on your own computer and copy it to the server, so nothing waits on the server side.
+
+On your computer (a browser opens, sign in and allow):
+
+```bash
+rclone config create gdrive drive scope=drive.file --config ~/gdrive-rclone.conf
+```
+
+Copy it to the server:
+
+```bash
+scp ~/gdrive-rclone.conf root@SERVER-IP:/DATA/AppData/casaos-backup/config/rclone/rclone.conf
+```
+
+No SSH? Open `nano config/rclone/rclone.conf` on the server and paste **all** lines of the file (`[gdrive]`, `type`, `scope` and `token`). Then test and start:
+
+```bash
+sudo docker compose run --rm --entrypoint rclone casaos-backup lsd gdrive:
+```
+
+```bash
+sudo docker compose up -d
+```
+
+> If the connection fails (missing or expired token), the container does not crash; it logs the error and retries every 5 minutes, so you can fix the config while it is running.
+
 #### 4. Run the first backup manually (recommended)
 
 The first backup uploads everything and may take a long time; later runs upload only changes.
@@ -270,6 +296,32 @@ Sihirbazda:
 7. Shared drive sorusu → `n`, sonra `y` ile kaydedin, `q` ile çıkın
 
 Konteyner bir dakika içinde yapılandırmayı fark eder, Drive'da `casaos-backup` klasörünü ve restic deposunu oluşturur.
+
+**Alternatif (terminaliniz kopuyorsa önerilir, ör. CasaOS web terminali):** ayar dosyasını kendi bilgisayarınızda oluşturup sunucuya kopyalayın; böylece sunucu tarafında hiçbir şey beklemez.
+
+Bilgisayarınızda (tarayıcı açılır, giriş yapıp izin verin):
+
+```bash
+rclone config create gdrive drive scope=drive.file --config ~/gdrive-rclone.conf
+```
+
+Sunucuya kopyalayın:
+
+```bash
+scp ~/gdrive-rclone.conf root@SUNUCU-IP:/DATA/AppData/casaos-backup/config/rclone/rclone.conf
+```
+
+SSH yoksa sunucuda `nano config/rclone/rclone.conf` açıp dosyanın **tüm** satırlarını (`[gdrive]`, `type`, `scope` ve `token`) yapıştırın. Sonra test edip başlatın:
+
+```bash
+sudo docker compose run --rm --entrypoint rclone casaos-backup lsd gdrive:
+```
+
+```bash
+sudo docker compose up -d
+```
+
+> Bağlantı kurulamazsa (eksik veya süresi dolmuş token) konteyner çökmez; hatayı loga yazar ve 5 dakikada bir tekrar dener. Böylece ayarı konteyner çalışırken düzeltebilirsiniz.
 
 #### 4. İlk yedeği elle alın (önerilir)
 
