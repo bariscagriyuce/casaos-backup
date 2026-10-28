@@ -16,6 +16,15 @@ if [ -z "${RESTIC_PASSWORD:-}" ] || [ -z "${RESTIC_REPOSITORY:-}" ]; then
   exit 1
 fi
 
+# Önceki yedek konteynerleri durdurduktan sonra yarıda kesildiyse (sunucu yeniden başladı,
+# konteyner yeniden oluşturuldu...) onları tekrar başlat.
+STATE_FILE=/config/.stopped-containers
+if [ -s "$STATE_FILE" ]; then
+  log "Yarıda kalan yedekten kalan durdurulmuş konteynerler başlatılıyor: $(tr '\n' ' ' < "$STATE_FILE")"
+  xargs -r docker start < "$STATE_FILE" >/dev/null || log "UYARI: bazı konteynerler başlatılamadı!"
+  rm -f "$STATE_FILE"
+fi
+
 # rclone yapılandırılana kadar bekle (crash-loop yerine). Kurulum:
 #   docker compose exec casaos-backup rclone config
 until [ -s "$RCLONE_CONFIG" ]; do

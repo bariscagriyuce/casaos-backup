@@ -59,37 +59,33 @@ The container waits until rclone is configured (check with `docker logs casaos-b
 
 #### 3. Configure the Google Drive connection (rclone)
 
-```bash
-sudo docker compose exec casaos-backup rclone config
-```
+rclone's shared Google client ID is being retired in 2026, so you need **your own (free) client ID**. You also do the Google sign-in on your own computer, so nothing waits on the server (web terminals like CasaOS's tend to disconnect).
 
-In the wizard:
+**3a. Create a client ID** at [console.cloud.google.com](https://console.cloud.google.com):
 
-1. `n` (new remote) → name: **`gdrive`**
-2. Storage: **`drive`** (Google Drive)
-3. `client_id` / `client_secret`: can be left empty (with lots of data, [your own client ID](https://rclone.org/drive/#making-your-own-client-id) avoids rate limits)
-4. scope: **`1`** (full access) or **`3`** (drive.file — only files created by rclone, safer)
-5. `Use web browser to automatically authenticate?` → **`n`** (the server has no browser)
-6. Run the shown `rclone authorize "drive" "..."` command **on a computer with a browser** (rclone must be installed there), sign in with Google and paste the resulting token into the wizard on the server
-7. Shared drive → `n`, then `y` to save and `q` to quit
+1. Create a new project (e.g. `casaos-backup`).
+2. **APIs & Services → Library → Google Drive API → Enable**.
+3. **Google Auth Platform** (or **OAuth consent screen**): enter an app name and your e-mail, user type **External**.
+4. **Audience → Publish app**. Otherwise the token expires every 7 days and backups stop. The `drive.file` scope needs no Google review.
+5. **Clients → Create client → Desktop app**. Copy the **Client ID** and **Client secret**.
 
-Within a minute the container detects the config and creates the `casaos-backup` folder and the restic repository on Drive.
-
-**Alternative (recommended if your terminal disconnects, e.g. the CasaOS web terminal):** create the config on your own computer and copy it to the server, so nothing waits on the server side.
-
-On your computer (a browser opens, sign in and allow):
+**3b. Create the rclone config on your computer** ([install rclone](https://rclone.org/install/) there; a browser opens, sign in and allow):
 
 ```bash
-rclone config create gdrive drive scope=drive.file --config ~/gdrive-rclone.conf
+rclone config create gdrive drive client_id=YOUR_CLIENT_ID client_secret=YOUR_SECRET scope=drive.file --config ~/gdrive-rclone.conf
 ```
 
-Copy it to the server:
+> `scope=drive.file` lets rclone see only the files it created itself; the rest of your Drive stays out of reach. Files are tied to the client ID: if you change the client ID later, rclone can no longer see the existing backups.
+
+**3c. Copy it to the server:**
 
 ```bash
 scp ~/gdrive-rclone.conf root@SERVER-IP:/DATA/AppData/casaos-backup/config/rclone/rclone.conf
 ```
 
-No SSH? Open `nano config/rclone/rclone.conf` on the server and paste **all** lines of the file (`[gdrive]`, `type`, `scope` and `token`). Then test and start:
+No SSH? Open `nano config/rclone/rclone.conf` on the server and paste **all** lines of the file (`[gdrive]`, `type`, `client_id`, `client_secret`, `scope`, `token`).
+
+**3d. Test and start:**
 
 ```bash
 sudo docker compose run --rm --entrypoint rclone casaos-backup lsd gdrive:
@@ -99,15 +95,28 @@ sudo docker compose run --rm --entrypoint rclone casaos-backup lsd gdrive:
 sudo docker compose up -d
 ```
 
+Within a minute the container creates the `casaos-backup` folder and the restic repository on Drive (`docker logs casaos-backup` shows `created restic repository`).
+
 > If the connection fails (missing or expired token), the container does not crash; it logs the error and retries every 5 minutes, so you can fix the config while it is running.
+
+<details><summary>Alternative: interactive wizard on the server</summary>
+
+```bash
+sudo docker compose exec casaos-backup rclone config
+```
+
+`n` → name `gdrive` → storage `drive` → enter your client ID/secret → scope `3` → `Use web browser?` `n` → run the shown `rclone authorize "drive" "..."` command on a computer with a browser and paste the result → Shared drive `n` → `y` → `q`. Answer quickly: the wizard is lost if the terminal disconnects.
+</details>
 
 #### 4. Run the first backup manually (recommended)
 
-The first backup uploads everything and may take a long time; later runs upload only changes.
+The first backup uploads everything and may take hours; later runs upload only changes. Start it in the background so it keeps running if your terminal disconnects:
 
 ```bash
-sudo docker compose exec casaos-backup backup
+sudo docker exec -d casaos-backup sh -c 'backup > /proc/1/fd/1 2>&1'
 ```
+
+Containers are **not** stopped during this first backup (`FIRST_BACKUP_NO_STOP=true`). Progress appears in `docker logs casaos-backup` once a minute.
 
 From then on it runs automatically at `BACKUP_CRON` from `.env` (default: every night at 03:00).
 
@@ -137,9 +146,23 @@ Space used on Drive:
 sudo docker compose exec casaos-backup restic stats --mode raw-data
 ```
 
+Stop a running backup (containers are restarted automatically):
+
+```bash
+sudo docker exec casaos-backup pkill restic
+```
+
+> Don't use `docker stop casaos-backup` for this: the script can't restart your apps then. (If it happens anyway, they are started again the next time the backup container starts.)
+
+### Performance
+
+The backup runs with low CPU/disk priority and is limited to `BACKUP_CPUS` (default 1) and `BACKUP_MEM_LIMIT` (default 1536m). If the server becomes slow or unreachable during backups, lower these in `.env`; if uploads are slow and you have spare RAM, raise `DRIVE_CHUNK_SIZE` (e.g. `64M`). Apply with `sudo docker compose up -d`.
+
 ### Container stop behaviour
 
-`STOP_MODE=all` (default): all running containers are stopped during the backup and restarted right after the files are read (before pruning). For incremental backups this is usually a few minutes.
+`STOP_MODE=all` (default): all running containers are stopped during the backup and restarted right after the files are read (before pruning). For incremental backups this is usually a few minutes. The first backup is taken without stopping anything (`FIRST_BACKUP_NO_STOP`). If a backup is interrupted while apps are stopped (e.g. the server reboots), they are started again when the backup container starts.
+
+> Containers you need to reach the server (Cloudflare Tunnel, Tailscale, VPN, reverse proxy, Pi-hole/AdGuard DNS) should get the `casaos-backup.stop: "false"` label below, otherwise you lose access during backups.
 
 To never stop a specific app, add this label to its compose file (in CasaOS: app → Settings → edit compose):
 
@@ -281,37 +304,33 @@ Konteyner, rclone ayarlanana kadar bekleme modunda kalır (`docker logs casaos-b
 
 #### 3. Google Drive bağlantısını (rclone) yapın
 
-```bash
-sudo docker compose exec casaos-backup rclone config
-```
+rclone'un herkesin ortak kullandığı Google client ID'si 2026'da kapatılıyor; bu yüzden **size ait (ücretsiz) bir client ID** gerekiyor. Google girişini de kendi bilgisayarınızda yapacaksınız; böylece sunucuda hiçbir şey beklemez (CasaOS'unki gibi web terminalleri sık kopar).
 
-Sihirbazda:
+**3a. Client ID oluşturun** — [console.cloud.google.com](https://console.cloud.google.com):
 
-1. `n` (new remote) → isim: **`gdrive`**
-2. Storage: **`drive`** (Google Drive)
-3. `client_id` / `client_secret`: boş bırakabilirsiniz (çok veri varsa [kendi client ID'nizi](https://rclone.org/drive/#making-your-own-client-id) oluşturmanız hız limitlerini önler)
-4. scope: **`1`** (full access) veya **`3`** (drive.file — sadece rclone'un oluşturduğu dosyalar, daha güvenli)
-5. `Use web browser to automatically authenticate?` → **`n`** (sunucuda tarayıcı yok)
-6. Ekranda verilen `rclone authorize "drive" "..."` komutunu **tarayıcısı olan bilgisayarınızda** çalıştırın (o bilgisayarda rclone kurulu olmalı), Google ile giriş yapın, çıkan token'ı sunucudaki sihirbaza yapıştırın
-7. Shared drive sorusu → `n`, sonra `y` ile kaydedin, `q` ile çıkın
+1. Yeni bir proje oluşturun (ör. `casaos-backup`).
+2. **APIs & Services → Library → Google Drive API → Enable**.
+3. **Google Auth Platform** (veya **OAuth consent screen**): uygulama adı ve e-postanızı girin, kullanıcı tipi **External**.
+4. **Audience → Publish app**. Yapmazsanız token 7 günde bir geçersiz olur ve yedekler durur. `drive.file` izni Google incelemesi gerektirmez.
+5. **Clients → Create client → Desktop app**. **Client ID** ve **Client secret** değerlerini kopyalayın.
 
-Konteyner bir dakika içinde yapılandırmayı fark eder, Drive'da `casaos-backup` klasörünü ve restic deposunu oluşturur.
-
-**Alternatif (terminaliniz kopuyorsa önerilir, ör. CasaOS web terminali):** ayar dosyasını kendi bilgisayarınızda oluşturup sunucuya kopyalayın; böylece sunucu tarafında hiçbir şey beklemez.
-
-Bilgisayarınızda (tarayıcı açılır, giriş yapıp izin verin):
+**3b. rclone ayarını kendi bilgisayarınızda oluşturun** (orada [rclone kurulu](https://rclone.org/install/) olmalı; tarayıcı açılır, giriş yapıp izin verin):
 
 ```bash
-rclone config create gdrive drive scope=drive.file --config ~/gdrive-rclone.conf
+rclone config create gdrive drive client_id=CLIENT_ID_NIZ client_secret=SECRET_INIZ scope=drive.file --config ~/gdrive-rclone.conf
 ```
 
-Sunucuya kopyalayın:
+> `scope=drive.file` ile rclone sadece kendi oluşturduğu dosyaları görür; Drive'ınızın geri kalanına erişemez. Dosyalar client ID'ye bağlıdır: ileride client ID'yi değiştirirseniz rclone mevcut yedekleri göremez.
+
+**3c. Sunucuya kopyalayın:**
 
 ```bash
 scp ~/gdrive-rclone.conf root@SUNUCU-IP:/DATA/AppData/casaos-backup/config/rclone/rclone.conf
 ```
 
-SSH yoksa sunucuda `nano config/rclone/rclone.conf` açıp dosyanın **tüm** satırlarını (`[gdrive]`, `type`, `scope` ve `token`) yapıştırın. Sonra test edip başlatın:
+SSH yoksa sunucuda `nano config/rclone/rclone.conf` açıp dosyanın **tüm** satırlarını (`[gdrive]`, `type`, `client_id`, `client_secret`, `scope`, `token`) yapıştırın.
+
+**3d. Test edip başlatın:**
 
 ```bash
 sudo docker compose run --rm --entrypoint rclone casaos-backup lsd gdrive:
@@ -321,15 +340,28 @@ sudo docker compose run --rm --entrypoint rclone casaos-backup lsd gdrive:
 sudo docker compose up -d
 ```
 
+Bir dakika içinde konteyner Drive'da `casaos-backup` klasörünü ve restic deposunu oluşturur (`docker logs casaos-backup` çıktısında `created restic repository` görünür).
+
 > Bağlantı kurulamazsa (eksik veya süresi dolmuş token) konteyner çökmez; hatayı loga yazar ve 5 dakikada bir tekrar dener. Böylece ayarı konteyner çalışırken düzeltebilirsiniz.
+
+<details><summary>Alternatif: sunucuda etkileşimli sihirbaz</summary>
+
+```bash
+sudo docker compose exec casaos-backup rclone config
+```
+
+`n` → isim `gdrive` → storage `drive` → client ID/secret'ınızı girin → scope `3` → `Use web browser?` `n` → ekrandaki `rclone authorize "drive" "..."` komutunu tarayıcılı bir bilgisayarda çalıştırıp sonucu yapıştırın → Shared drive `n` → `y` → `q`. Hızlı olun: terminal koparsa sihirbaz yarıda kalır.
+</details>
 
 #### 4. İlk yedeği elle alın (önerilir)
 
-İlk yedek tüm veriyi yükleyeceği için uzun sürebilir; sonrakiler sadece değişiklikleri yükler.
+İlk yedek tüm veriyi yükler ve saatler sürebilir; sonrakiler sadece değişiklikleri yükler. Terminal kopsa bile devam etmesi için arka planda başlatın:
 
 ```bash
-sudo docker compose exec casaos-backup backup
+sudo docker exec -d casaos-backup sh -c 'backup > /proc/1/fd/1 2>&1'
 ```
+
+Bu ilk yedekte konteynerler **durdurulmaz** (`FIRST_BACKUP_NO_STOP=true`). İlerleme dakikada bir `docker logs casaos-backup` çıktısında görünür.
 
 Bundan sonra `.env` içindeki `BACKUP_CRON` zamanında (varsayılan her gece 03:00) otomatik çalışır.
 
@@ -359,9 +391,23 @@ Drive'da ne kadar yer kaplıyor:
 sudo docker compose exec casaos-backup restic stats --mode raw-data
 ```
 
+Çalışan bir yedeği durdurma (konteynerler otomatik tekrar başlatılır):
+
+```bash
+sudo docker exec casaos-backup pkill restic
+```
+
+> Bunun için `docker stop casaos-backup` kullanmayın: script uygulamalarınızı tekrar başlatamaz. (Yine de olursa, yedek konteyneri bir sonraki açılışında onları başlatır.)
+
+### Performans
+
+Yedek düşük CPU/disk önceliğiyle çalışır ve `BACKUP_CPUS` (varsayılan 1) ile `BACKUP_MEM_LIMIT` (varsayılan 1536m) ile sınırlıdır. Yedek sırasında sunucu yavaşlıyor veya erişilemez oluyorsa bunları `.env` içinde düşürün; yükleme yavaşsa ve boş RAM varsa `DRIVE_CHUNK_SIZE` değerini artırın (ör. `64M`). `sudo docker compose up -d` ile uygulayın.
+
 ### Konteyner durdurma davranışı
 
-`STOP_MODE=all` (varsayılan): yedek alınırken çalışan tüm konteynerler durdurulur, dosyalar okunduktan hemen sonra (prune'dan önce) tekrar başlatılır. Artımlı yedeklerde bu genelde birkaç dakikadır.
+`STOP_MODE=all` (varsayılan): yedek alınırken çalışan tüm konteynerler durdurulur, dosyalar okunduktan hemen sonra (prune'dan önce) tekrar başlatılır. Artımlı yedeklerde bu genelde birkaç dakikadır. İlk yedek hiçbir şey durdurulmadan alınır (`FIRST_BACKUP_NO_STOP`). Uygulamalar durdurulmuşken yedek yarıda kesilirse (ör. sunucu yeniden başlarsa), yedek konteyneri açılışta onları tekrar başlatır.
+
+> Sunucuya erişmenizi sağlayan konteynerlere (Cloudflare Tunnel, Tailscale, VPN, reverse proxy, Pi-hole/AdGuard DNS) aşağıdaki `casaos-backup.stop: "false"` etiketini ekleyin; yoksa yedek sırasında erişiminiz kesilir.
 
 Belirli bir uygulamanın hiç durdurulmamasını istiyorsanız o uygulamanın compose dosyasına (CasaOS'ta uygulama → Ayarlar → compose düzenle) etiket ekleyin:
 

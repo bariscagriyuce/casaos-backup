@@ -5,3 +5,4 @@ config/rclone/
 # Runtime data
 cache/
 restore/
+config/.stopped-containers

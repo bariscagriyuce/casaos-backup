@@ -11,10 +11,18 @@ set -Eeuo pipefail
 : "${KEEP_WEEKLY:=4}"
 : "${KEEP_MONTHLY:=6}"
 : "${NOTIFY_ON:=failure}"      # failure | always | never
+: "${FIRST_BACKUP_NO_STOP:=true}"
 EXCLUDE_FILE=/config/excludes.txt
 META_DIR=/backup-meta
+# Durdurulan konteynerlerin listesi; yedek yarıda kesilirse entrypoint açılışta bunları başlatır.
+STATE_FILE=/config/.stopped-containers
 
 log() { echo "[$(date '+%F %T')] $*"; }
+
+# Sunucunun geri kalanını yavaşlatmamak için düşük CPU/disk önceliğiyle çalıştır.
+IONICE=()
+ionice -t -c 2 -n 7 true 2>/dev/null && IONICE=(ionice -t -c 2 -n 7)
+low() { nice -n 19 "${IONICE[@]}" "$@"; }
 
 notify() {
   local title=$1 msg=$2
@@ -36,7 +44,7 @@ fi
 
 if [ "${1:-}" = "--check-only" ]; then
   log "Depo kontrolü başlıyor..."
-  if restic check --read-data-subset=5%; then
+  if low restic check --read-data-subset=5%; then
     log "Depo kontrolü başarılı."
   else
     log "HATA: depo kontrolü başarısız!"
@@ -63,6 +71,7 @@ stop_containers() {
   done < <(docker ps --format '{{.ID}}|{{.Names}}|{{.Label "casaos-backup.stop"}}|{{.Label "casaos-backup.self"}}')
 
   if [ "${#STOPPED[@]}" -gt 0 ]; then
+    printf '%s\n' "${STOPPED[@]}" > "$STATE_FILE"
     docker stop -t "$STOP_TIMEOUT" "${STOPPED[@]}" >/dev/null
   fi
 }
@@ -71,6 +80,7 @@ start_containers() {
   [ "${#STOPPED[@]}" -eq 0 ] && return 0
   log "Konteynerler yeniden başlatılıyor (${#STOPPED[@]})..."
   docker start "${STOPPED[@]}" >/dev/null || log "UYARI: bazı konteynerler başlatılamadı!"
+  rm -f "$STATE_FILE"
   STOPPED=()
 }
 
@@ -94,11 +104,17 @@ docker ps -aq | xargs -r docker inspect > "$META_DIR/inspect.json"
 docker network ls --format '{{.Name}}\t{{.Driver}}' > "$META_DIR/networks.tsv"
 docker volume ls --format '{{.Name}}' > "$META_DIR/volumes.txt"
 
-stop_containers
+# İlk yedek tüm veriyi yüklediği için saatler sürebilir; konteynerleri bu kadar uzun kapalı tutma.
+snaps=$(restic snapshots --tag casaos --json --no-lock 2>/dev/null || true)
+if [ "$FIRST_BACKUP_NO_STOP" = true ] && [[ $snaps != *'"id"'* ]]; then
+  log "İlk yedek: konteynerler durdurulmadan alınıyor (FIRST_BACKUP_NO_STOP=true)."
+else
+  stop_containers
+fi
 
 # "|| rc=$?" ERR trap'ini tetiklemeden çıkış kodunu yakalar (3 = kısmi başarı).
 rc=0
-restic backup /source "$META_DIR" \
+low restic backup /source "$META_DIR" \
   --tag casaos \
   --exclude-file "$EXCLUDE_FILE" \
   --exclude-caches \
@@ -113,7 +129,7 @@ case $rc in
 esac
 
 log "Saklama politikası uygulanıyor (günlük=$KEEP_DAILY haftalık=$KEEP_WEEKLY aylık=$KEEP_MONTHLY)..."
-restic forget --tag casaos --group-by host,tags \
+low restic forget --tag casaos --group-by host,tags \
   --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" --keep-monthly "$KEEP_MONTHLY" \
   --prune
 

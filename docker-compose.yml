@@ -8,12 +8,22 @@ services:
     hostname: casaos
     restart: unless-stopped
     init: true
+    # Yedek sunucuyu kilitlemesin diye kaynak sınırı (.env içinden değiştirilebilir)
+    cpus: ${BACKUP_CPUS:-1.0}
+    mem_limit: ${BACKUP_MEM_LIMIT:-1536m}
     env_file: .env
     environment:
       RCLONE_CONFIG: /config/rclone/rclone.conf
       RESTIC_CACHE_DIR: /cache
       # Prune ile silinen parçalar Drive çöp kutusunda kotayı doldurmasın
       RCLONE_DRIVE_USE_TRASH: "false"
+      # Drive'a daha büyük dilimlerle yükle (varsayılan 8M yavaş); RAM ≈ dilim × 5 bağlantı
+      RCLONE_DRIVE_CHUNK_SIZE: ${DRIVE_CHUNK_SIZE:-32M}
+      # restic'in RAM/CPU kullanımını azalt
+      GOMAXPROCS: ${BACKUP_GOMAXPROCS:-2}
+      GOGC: "50"
+      # docker logs'ta dakikada bir ilerleme satırı göster
+      RESTIC_PROGRESS_FPS: "0.0167"
     labels:
       casaos-backup.self: "true"
     volumes:
