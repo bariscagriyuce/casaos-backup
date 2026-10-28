@@ -7,6 +7,7 @@ set -Eeuo pipefail
 
 : "${STOP_MODE:=all}"          # all | labeled | none
 : "${STOP_TIMEOUT:=60}"
+: "${STOP_EXCLUDE:=}"         # virgülle ayrılmış konteyner adları, hiç durdurulmaz
 : "${KEEP_DAILY:=7}"
 : "${KEEP_WEEKLY:=4}"
 : "${KEEP_MONTHLY:=6}"
@@ -61,6 +62,11 @@ stop_containers() {
   local id name stop self
   while IFS='|' read -r id name stop self; do
     [ "$self" = "true" ] && continue
+    # CasaOS konteynerleri kendi kayıtlarından yeniden oluşturup etiketleri kaybettirebildiği için ada göre muafiyet.
+    if [[ ",${STOP_EXCLUDE// /}," == *",$name,"* ]]; then
+      log "Muaf (STOP_EXCLUDE): $name"
+      continue
+    fi
     if [ "$STOP_MODE" = labeled ]; then
       [ "$stop" = "true" ] || continue
     else

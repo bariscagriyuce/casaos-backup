@@ -162,7 +162,13 @@ The backup runs with low CPU/disk priority and is limited to `BACKUP_CPUS` (defa
 
 `STOP_MODE=all` (default): all running containers are stopped during the backup and restarted right after the files are read (before pruning). For incremental backups this is usually a few minutes. The first backup is taken without stopping anything (`FIRST_BACKUP_NO_STOP`). If a backup is interrupted while apps are stopped (e.g. the server reboots), they are started again when the backup container starts.
 
-> Containers you need to reach the server (Cloudflare Tunnel, Tailscale, VPN, reverse proxy, Pi-hole/AdGuard DNS) should get the `casaos-backup.stop: "false"` label below, otherwise you lose access during backups.
+> Containers you need to reach the server (Cloudflare Tunnel, Tailscale, VPN, reverse proxy, Pi-hole/AdGuard DNS) must not be stopped, otherwise you lose access during backups. List their names in `.env` (find them with `docker ps --format '{{.Names}}'`), then apply with `sudo docker compose up -d`:
+>
+> ```bash
+> STOP_EXCLUDE=cloudflared,tailscale
+> ```
+>
+> This is the recommended way on CasaOS. The label below also works, but CasaOS sometimes recreates apps from its own stored settings and the label you added to the compose file is lost.
 
 To never stop a specific app, add this label to its compose file (in CasaOS: app → Settings → edit compose):
 
@@ -407,7 +413,13 @@ Yedek düşük CPU/disk önceliğiyle çalışır ve `BACKUP_CPUS` (varsayılan 
 
 `STOP_MODE=all` (varsayılan): yedek alınırken çalışan tüm konteynerler durdurulur, dosyalar okunduktan hemen sonra (prune'dan önce) tekrar başlatılır. Artımlı yedeklerde bu genelde birkaç dakikadır. İlk yedek hiçbir şey durdurulmadan alınır (`FIRST_BACKUP_NO_STOP`). Uygulamalar durdurulmuşken yedek yarıda kesilirse (ör. sunucu yeniden başlarsa), yedek konteyneri açılışta onları tekrar başlatır.
 
-> Sunucuya erişmenizi sağlayan konteynerlere (Cloudflare Tunnel, Tailscale, VPN, reverse proxy, Pi-hole/AdGuard DNS) aşağıdaki `casaos-backup.stop: "false"` etiketini ekleyin; yoksa yedek sırasında erişiminiz kesilir.
+> Sunucuya erişmenizi sağlayan konteynerler (Cloudflare Tunnel, Tailscale, VPN, reverse proxy, Pi-hole/AdGuard DNS) durdurulmamalı; yoksa yedek sırasında erişiminiz kesilir. Adlarını `.env` dosyasına yazın (`docker ps --format '{{.Names}}'` ile bulabilirsiniz), sonra `sudo docker compose up -d` ile uygulayın:
+>
+> ```bash
+> STOP_EXCLUDE=cloudflared,tailscale
+> ```
+>
+> CasaOS'ta önerilen yol budur. Aşağıdaki etiket de çalışır, ama CasaOS bazen uygulamaları kendi kayıtlı ayarlarından yeniden oluşturur ve compose dosyasına eklediğiniz etiket kaybolur.
 
 Belirli bir uygulamanın hiç durdurulmamasını istiyorsanız o uygulamanın compose dosyasına (CasaOS'ta uygulama → Ayarlar → compose düzenle) etiket ekleyin:
 
