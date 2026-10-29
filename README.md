@@ -23,7 +23,33 @@ A Docker Compose based system running on CasaOS that backs up your entire CasaOS
 | `/etc/casaos` | CasaOS service configuration |
 | (automatic) | Container, image, network and volume lists (`/backup-meta`) |
 
-To add more folders, uncomment the lines in `docker-compose.yml` or add `- /host/path:/source/host/path:ro`. Exclusions live in `config/excludes.txt`.
+To add more folders (for example apps that keep data outside `/DATA/AppData`, like `/srv/...`), create `docker-compose.override.yml` next to `docker-compose.yml`. Docker Compose merges it automatically and `git pull` never touches it:
+
+```yaml
+services:
+  casaos-backup:
+    volumes:
+      - /srv/lsio:/source/srv/lsio:ro
+      - /DATA/Media:/source/DATA/Media:ro
+      - /etc:/source/etc:ro
+      - /root:/source/root:ro
+```
+
+Apply with `sudo docker compose up -d`. To find folders that are not backed up yet:
+
+```bash
+docker inspect -f '{{.Name}}{{range .Mounts}} {{.Source}}{{end}}' $(docker ps -aq) | tr ' ' '\n' | grep '^/' | grep -vE '^/(DATA/AppData|var/lib/casaos|etc/casaos|var/lib/docker|var/run|run|dev|proc|sys)' | sort -u
+```
+
+(Lines that are just container names, like `/nextcloud`, can be ignored.)
+
+**Self-built Docker images** (an image you built with `docker build` that is not on a registry) are not in the backup. Save them into a backed-up folder, and repeat after every rebuild:
+
+```bash
+mkdir -p /DATA/AppData/docker-images && docker save IMAGE_NAME | gzip > /DATA/AppData/docker-images/IMAGE_NAME.tar.gz
+```
+
+Exclusions live in `config/excludes.txt`.
 
 ### Installation
 
@@ -195,39 +221,85 @@ Files are extracted on the host under `/DATA/AppData/casaos-backup/restore/sourc
 sudo rsync -a --delete /DATA/AppData/casaos-backup/restore/source/DATA/AppData/jellyfin/ /DATA/AppData/jellyfin/
 ```
 
-#### Full restore from scratch (disk failure / new server)
+#### Full restore from scratch (disk failure / new server / reinstall)
 
-1. Install CasaOS on the new server.
-2. Put this folder back under `/DATA/AppData/casaos-backup`, create `.env` with **the same `RESTIC_PASSWORD`**, and configure rclone again with the same `gdrive` name (or copy your old `config/rclone/rclone.conf`).
-3. Start the container and extract the latest snapshot:
+**Keep these outside the server, you can't restore without them:**
+
+- `RESTIC_PASSWORD` from `.env`. Without it the backups cannot be decrypted.
+- `config/rclone/rclone.conf`, **and** the Google Cloud project with your client ID. With `scope=drive.file` only that client ID can see the backups, so never delete that project. If you lose `rclone.conf`, create a new one with the same client ID (step 3b above).
+
+**Steps:**
+
+1. Install Debian and CasaOS.
+2. Install this tool again, but **don't start a backup**:
    ```bash
-   sudo docker compose up -d --build
+   sudo git clone https://github.com/bariscagriyuce/casaos-backup.git /DATA/AppData/casaos-backup
    ```
+   Create `.env` with **the same `RESTIC_PASSWORD`** and `RESTIC_REPOSITORY`, and copy `rclone.conf` to `config/rclone/`. Then:
    ```bash
-   sudo docker compose exec casaos-backup restore latest
+   cd /DATA/AppData/casaos-backup && sudo docker compose up -d --build
    ```
-4. Stop CasaOS and copy the files into place:
+3. Extract the latest snapshot (all files go into `restore/`, nothing is overwritten yet):
+   ```bash
+   sudo docker exec casaos-backup restore latest
+   ```
+4. Stop CasaOS so no app starts with empty data:
    ```bash
    sudo systemctl stop casaos casaos-app-management
    ```
+5. Copy the data back. `--numeric-ids` keeps the file owners the containers expect:
    ```bash
-   sudo rsync -a /DATA/AppData/casaos-backup/restore/source/DATA/AppData/ /DATA/AppData/
+   R=/DATA/AppData/casaos-backup/restore/source
    ```
    ```bash
-   sudo rsync -a /DATA/AppData/casaos-backup/restore/source/var/lib/casaos/ /var/lib/casaos/
+   sudo rsync -a --numeric-ids $R/DATA/AppData/ /DATA/AppData/
    ```
    ```bash
-   sudo rsync -a /DATA/AppData/casaos-backup/restore/source/etc/casaos/ /etc/casaos/
+   sudo rsync -a --numeric-ids $R/var/lib/casaos/ /var/lib/casaos/
    ```
-5. Start CasaOS; apps are recreated from the compose files in `/var/lib/casaos/apps`:
+   ```bash
+   sudo rsync -a --numeric-ids $R/etc/casaos/ /etc/casaos/
+   ```
+   Folders you added with `docker-compose.override.yml` (skip the ones you don't have):
+   ```bash
+   sudo mkdir -p /srv/lsio && sudo rsync -a --numeric-ids $R/srv/lsio/ /srv/lsio/
+   ```
+   ```bash
+   sudo rsync -a --numeric-ids $R/DATA/Media/ /DATA/Media/
+   ```
+   ```bash
+   sudo rsync -a --numeric-ids $R/root/ /root/
+   ```
+6. **Don't copy the whole `/etc`** over the new system: disk IDs, network settings and the machine ID differ, and the server may not boot. Take only what you need from `$R/etc`, for example:
+   - `/etc/ssh/` (keeps the server's SSH keys, so clients don't warn about a changed host)
+   - extra disk lines from `/etc/fstab` (copy the lines by hand, check the UUIDs with `blkid`)
+   - configs of other services you installed (e.g. `/etc/apache2/`)
+
+   To see what differs: `sudo diff -rq $R/etc /etc | less`
+7. Load self-built images (e.g. from `/DATA/AppData/docker-images`):
+   ```bash
+   for f in /DATA/AppData/docker-images/*.tar.gz; do sudo docker load < "$f"; done
+   ```
+8. Start CasaOS. Apps are recreated from the compose files in `/var/lib/casaos/apps`:
    ```bash
    sudo systemctl start casaos casaos-app-management
    ```
-   If apps don't come up automatically, for each one:
+   If an app does not come up, start it from the CasaOS dashboard, or:
    ```bash
    cd /var/lib/casaos/apps/APP_NAME && sudo docker compose up -d
    ```
-6. The old container/image lists are kept for reference under `restore/backup-meta/`.
+9. Restart the backup container, so it picks up the restored `docker-compose.override.yml`, then delete the extracted copy:
+   ```bash
+   cd /DATA/AppData/casaos-backup && sudo docker compose up -d
+   ```
+   ```bash
+   sudo rm -rf /DATA/AppData/casaos-backup/restore/source /DATA/AppData/casaos-backup/restore/backup-meta
+   ```
+   The next nightly backup continues in the same repository and uploads only the changes.
+
+The old container, image and network lists are in `restore/backup-meta/` if you need to look something up (before step 9).
+
+> **Test it once before you need it:** restore a small folder (`restore latest --include /source/DATA/AppData/SOME_APP`) and check the files in `restore/`.
 
 ### Security notes
 
@@ -274,7 +346,33 @@ CasaOS üzerinde Docker Compose ile çalışan, tüm CasaOS sistemini (uygulama 
 | `/etc/casaos` | CasaOS servis yapılandırmaları |
 | (otomatik) | Konteyner, imaj, ağ ve volume listesi (`/backup-meta`) |
 
-Başka klasör eklemek için `docker-compose.yml` içindeki yorumlu satırları açın veya `- /host/yol:/source/host/yol:ro` şeklinde ekleyin. Hariç tutmalar `config/excludes.txt` dosyasında.
+Başka klasör eklemek için (ör. verisini `/DATA/AppData` dışında, `/srv/...` gibi yerlerde tutan uygulamalar) `docker-compose.yml` dosyasının yanına `docker-compose.override.yml` oluşturun. Docker Compose bu dosyayı otomatik birleştirir ve `git pull` ona dokunmaz:
+
+```yaml
+services:
+  casaos-backup:
+    volumes:
+      - /srv/lsio:/source/srv/lsio:ro
+      - /DATA/Media:/source/DATA/Media:ro
+      - /etc:/source/etc:ro
+      - /root:/source/root:ro
+```
+
+`sudo docker compose up -d` ile uygulayın. Henüz yedeklenmeyen klasörleri bulmak için:
+
+```bash
+docker inspect -f '{{.Name}}{{range .Mounts}} {{.Source}}{{end}}' $(docker ps -aq) | tr ' ' '\n' | grep '^/' | grep -vE '^/(DATA/AppData|var/lib/casaos|etc/casaos|var/lib/docker|var/run|run|dev|proc|sys)' | sort -u
+```
+
+(`/nextcloud` gibi sadece konteyner adı olan satırları yok sayın.)
+
+**Kendi oluşturduğunuz Docker imajları** (`docker build` ile yaptığınız, hiçbir registry'de olmayan imajlar) yedekte yoktur. Yedeklenen bir klasöre kaydedin ve her yeniden derlemeden sonra tekrarlayın:
+
+```bash
+mkdir -p /DATA/AppData/docker-images && docker save IMAJ_ADI | gzip > /DATA/AppData/docker-images/IMAJ_ADI.tar.gz
+```
+
+Hariç tutmalar `config/excludes.txt` dosyasında.
 
 ### Kurulum
 
@@ -446,39 +544,85 @@ Dosyalar hostta `/DATA/AppData/casaos-backup/restore/source/DATA/AppData/jellyfi
 sudo rsync -a --delete /DATA/AppData/casaos-backup/restore/source/DATA/AppData/jellyfin/ /DATA/AppData/jellyfin/
 ```
 
-#### Sıfırdan tüm sistemi geri yükleme (disk çöktü / yeni sunucu)
+#### Sıfırdan tüm sistemi geri yükleme (disk çöktü / yeni sunucu / format)
 
-1. Yeni sunucuya CasaOS'u kurun.
-2. Bu klasörü tekrar `/DATA/AppData/casaos-backup` altına koyun, **aynı `RESTIC_PASSWORD`** ile `.env` oluşturun, rclone'u aynı `gdrive` adıyla tekrar yapılandırın (veya eski `config/rclone/rclone.conf` dosyasını kopyalayın).
-3. Konteyneri başlatıp tüm son snapshot'ı açın:
+**Bunları sunucunun dışında saklayın, onlar olmadan geri yükleyemezsiniz:**
+
+- `.env` içindeki `RESTIC_PASSWORD`. Bu olmadan yedekler açılamaz.
+- `config/rclone/rclone.conf` **ve** client ID'nizin bulunduğu Google Cloud projesi. `scope=drive.file` ile yedekleri sadece o client ID görebilir; o projeyi asla silmeyin. `rclone.conf` kaybolursa aynı client ID ile yenisini oluşturun (yukarıdaki 3b adımı).
+
+**Adımlar:**
+
+1. Debian ve CasaOS'u kurun.
+2. Bu aracı tekrar kurun ama **yedek başlatmayın**:
    ```bash
-   sudo docker compose up -d --build
+   sudo git clone https://github.com/bariscagriyuce/casaos-backup.git /DATA/AppData/casaos-backup
    ```
+   **Aynı `RESTIC_PASSWORD`** ve `RESTIC_REPOSITORY` ile `.env` oluşturun, `rclone.conf` dosyasını `config/rclone/` içine kopyalayın. Sonra:
    ```bash
-   sudo docker compose exec casaos-backup restore latest
+   cd /DATA/AppData/casaos-backup && sudo docker compose up -d --build
    ```
-4. CasaOS'u durdurun ve dosyaları yerlerine kopyalayın:
+3. Son snapshot'ı açın (tüm dosyalar `restore/` altına gelir, henüz hiçbir şeyin üzerine yazılmaz):
+   ```bash
+   sudo docker exec casaos-backup restore latest
+   ```
+4. Hiçbir uygulama boş veriyle başlamasın diye CasaOS'u durdurun:
    ```bash
    sudo systemctl stop casaos casaos-app-management
    ```
+5. Verileri geri kopyalayın. `--numeric-ids`, konteynerlerin beklediği dosya sahipliğini korur:
    ```bash
-   sudo rsync -a /DATA/AppData/casaos-backup/restore/source/DATA/AppData/ /DATA/AppData/
+   R=/DATA/AppData/casaos-backup/restore/source
    ```
    ```bash
-   sudo rsync -a /DATA/AppData/casaos-backup/restore/source/var/lib/casaos/ /var/lib/casaos/
+   sudo rsync -a --numeric-ids $R/DATA/AppData/ /DATA/AppData/
    ```
    ```bash
-   sudo rsync -a /DATA/AppData/casaos-backup/restore/source/etc/casaos/ /etc/casaos/
+   sudo rsync -a --numeric-ids $R/var/lib/casaos/ /var/lib/casaos/
    ```
-5. CasaOS'u başlatın; uygulamalar `/var/lib/casaos/apps` altındaki compose dosyalarından tekrar oluşturulur:
+   ```bash
+   sudo rsync -a --numeric-ids $R/etc/casaos/ /etc/casaos/
+   ```
+   `docker-compose.override.yml` ile eklediğiniz klasörler (sizde olmayanları atlayın):
+   ```bash
+   sudo mkdir -p /srv/lsio && sudo rsync -a --numeric-ids $R/srv/lsio/ /srv/lsio/
+   ```
+   ```bash
+   sudo rsync -a --numeric-ids $R/DATA/Media/ /DATA/Media/
+   ```
+   ```bash
+   sudo rsync -a --numeric-ids $R/root/ /root/
+   ```
+6. **`/etc` klasörünün tamamını** yeni sistemin üzerine kopyalamayın: disk kimlikleri, ağ ayarları ve makine kimliği farklıdır; sunucu açılmayabilir. `$R/etc` içinden sadece ihtiyacınız olanları alın, örneğin:
+   - `/etc/ssh/` (sunucunun SSH anahtarları korunur, istemciler "anahtar değişti" uyarısı vermez)
+   - `/etc/fstab` içindeki ek disk satırları (satırları elle kopyalayın, UUID'leri `blkid` ile kontrol edin)
+   - kurduğunuz diğer servislerin ayarları (ör. `/etc/apache2/`)
+
+   Farkları görmek için: `sudo diff -rq $R/etc /etc | less`
+7. Kendi oluşturduğunuz imajları yükleyin (ör. `/DATA/AppData/docker-images` içinden):
+   ```bash
+   for f in /DATA/AppData/docker-images/*.tar.gz; do sudo docker load < "$f"; done
+   ```
+8. CasaOS'u başlatın; uygulamalar `/var/lib/casaos/apps` altındaki compose dosyalarından yeniden oluşturulur:
    ```bash
    sudo systemctl start casaos casaos-app-management
    ```
-   Uygulamalar otomatik ayağa kalkmazsa her biri için:
+   Bir uygulama ayağa kalkmazsa CasaOS panelinden başlatın ya da:
    ```bash
    cd /var/lib/casaos/apps/UYGULAMA_ADI && sudo docker compose up -d
    ```
-6. Eski konteyner/imaj listesi referans için `restore/backup-meta/` altında durur.
+9. Yedek konteynerini geri yüklenen `docker-compose.override.yml` ile yeniden başlatın, sonra açılan kopyayı silin:
+   ```bash
+   cd /DATA/AppData/casaos-backup && sudo docker compose up -d
+   ```
+   ```bash
+   sudo rm -rf /DATA/AppData/casaos-backup/restore/source /DATA/AppData/casaos-backup/restore/backup-meta
+   ```
+   Bir sonraki gece yedeği aynı depoda devam eder ve sadece değişiklikleri yükler.
+
+Eski konteyner, imaj ve ağ listeleri, bir şeye bakmanız gerekirse `restore/backup-meta/` altındadır (9. adımdan önce).
+
+> **İhtiyacınız olmadan önce bir kez deneyin:** küçük bir klasörü geri yükleyin (`restore latest --include /source/DATA/AppData/BIR_UYGULAMA`) ve `restore/` altındaki dosyaları kontrol edin.
 
 ### Güvenlik notları
 

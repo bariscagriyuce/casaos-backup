@@ -6,3 +6,4 @@ config/rclone/
 cache/
 restore/
 config/.stopped-containers
+docker-compose.override.yml
